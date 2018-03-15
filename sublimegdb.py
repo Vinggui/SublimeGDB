@@ -116,8 +116,14 @@ def expand_path(value, window):
     # search in projekt for path and get folder from path
     value = re.sub(r'\${project_path:(?P<file>[^}]+)}', lambda m: len(get_existing_files(m)) > 0 and get_existing_files(m)[0] or m.group('file'), value)
     value = re.sub(r'\${folder:(?P<file>.*)}', lambda m: os.path.dirname(m.group('file')), value)
-    value = value.replace('\\', os.sep)
-    value = value.replace('/', os.sep)
+    if get_setting("windows_bash_compatibility"):
+        value = value.replace('\\', '/')
+    else:
+        value = value.replace('\\', os.sep)
+        value = value.replace('/', os.sep)
+
+    # Working with WSL, do some tweaks
+    
 
     return value
 
@@ -125,6 +131,8 @@ def expand_path(value, window):
 DEBUG = None
 DEBUG_FILE = None
 __debug_file_handle = None
+
+gdb_windows_bash = False
 
 gdb_lastresult = ""
 gdb_lastline = ""
@@ -149,6 +157,7 @@ if os.name == 'nt':
 gdb_run_status = None
 result_regex = re.compile("(?<=\^)[^,\"]*")
 collapse_regex = re.compile("{.*}", re.DOTALL)
+
 
 
 def normalize(filename):
@@ -1264,6 +1273,7 @@ count = 0
 
 def run_cmd(cmd, block=False, mimode=True, timeout=10):
     global count
+    global gdb_windows_bash
     if not is_running():
         return "0^error,msg=\"no session running\""
 
@@ -1272,6 +1282,9 @@ def run_cmd(cmd, block=False, mimode=True, timeout=10):
     ### handle a list of commands by recursively calling run_cmd
     if isinstance(cmd, list):
         for c in cmd:
+            if gdb_windows_bash and c.find(':/') >= 0:
+                driver_partition = c[c.find(':/')-1]
+                c = c.replace(driver_partition+":/", "/mnt/"+driver_partition+"/")
             run_cmd(c, block, mimode, timeout)
         return count
 
@@ -1280,6 +1293,9 @@ def run_cmd(cmd, block=False, mimode=True, timeout=10):
         cmd = "%d%s\n" % (count, cmd)
     else:
         cmd = "%s\n\n" % cmd
+    if gdb_windows_bash and cmd.find(':/') >= 0:
+        driver_partition = cmd[cmd.find(':/')-1]
+        cmd = cmd.replace(driver_partition+":/", "/mnt/"+driver_partition+"/")
     log_debug(cmd)
     if gdb_session_view is not None:
         gdb_session_view.add_line(cmd, False)
@@ -1386,6 +1402,7 @@ def gdboutput(pipe):
     global gdb_stack_frame
     global gdb_run_status
     global gdb_stack_index
+    global gdb_windows_bash
     command_result_regex = re.compile("^\d+\^")
     run_status_regex = re.compile("(^\d*\*)([^,]+)")
 
@@ -1396,6 +1413,10 @@ def gdboutput(pipe):
                 log_debug("gdb_%s: broken pipe\n" % ("stdout" if pipe == gdb_process.stdout else "stderr"))
                 break
             line = line.strip().decode(sys.getdefaultencoding())
+            # transform linux file system to windows again
+            if gdb_windows_bash and line.find('/mnt/') >= 0:
+                driver_partition = line[line.find('/mnt/')+5]
+                line = line.replace('/mnt/'+driver_partition,driver_partition+':')
             log_debug("gdb_%s: %s\n" % ("stdout" if pipe == gdb_process.stdout else "stderr", line))
             gdb_session_view.add_line("%s\n" % line, False)
 
@@ -1587,6 +1608,7 @@ class GdbInput(sublime_plugin.WindowCommand):
 class GdbLaunch(sublime_plugin.WindowCommand):
     def run(self):
         global exec_settings
+        global gdb_windows_bash
         s = self.window.active_view().settings()
         exec_choices = s.get("sublimegdb_executables")
 
@@ -1615,6 +1637,7 @@ class GdbLaunch(sublime_plugin.WindowCommand):
         global gdb_bkp_view
         global gdb_bkp_layout
         global gdb_shutting_down
+        global gdb_windows_bash
         global DEBUG
         global DEBUG_FILE
         view = self.window.active_view()
@@ -1651,6 +1674,7 @@ class GdbLaunch(sublime_plugin.WindowCommand):
                 return
 
             # get env settings
+            gdb_windows_bash = get_setting("windows_bash_compatibility")
             gdb_env = get_setting("env", "notset")
             if gdb_env == "notset":
                 gdb_env = None
@@ -1704,25 +1728,26 @@ class GdbLaunch(sublime_plugin.WindowCommand):
             t = threading.Thread(target=gdboutput, args=(gdb_process.stderr,))
             t.start()
 
-            try:
-                raise Exception("Nope")
-                pty, tty = os.openpty()
-                name = os.ttyname(tty)
-            except:
-                pipe, name = tempfile.mkstemp()
-                pty, tty = pipe, None
-            log_debug("pty: %s, tty: %s, name: %s" % (pty, tty, name))
-            t = threading.Thread(target=programio, args=(pty,tty))
-            t.start()
-            try:
-                run_cmd("-gdb-show interpreter", True, timeout=get_setting("gdb_timeout", 20))
-            except:
-                sublime.error_message("""\
-It seems you're not running gdb with the "mi" interpreter. Please add
-"--interpreter=mi" to your gdb command line""")
-                gdb_process.stdin.write("quit\n")
-                return
-            run_cmd("-inferior-tty-set %s" % name, True)
+            if gdb_windows_bash == False:
+                try:
+                    raise Exception("Nope")
+                    pty, tty = os.openpty()
+                    name = os.ttyname(tty)
+                except:
+                    pipe, name = tempfile.mkstemp()
+                    pty, tty = pipe, None
+                log_debug("pty: %s, tty: %s, name: %s" % (pty, tty, name))
+                t = threading.Thread(target=programio, args=(pty,tty))
+                t.start()
+                try:
+                    run_cmd("-gdb-show interpreter", True, timeout=get_setting("gdb_timeout", 20))
+                except:
+                    sublime.error_message("""\
+    It seems you're not running gdb with the "mi" interpreter. Please add
+    "--interpreter=mi" to your gdb command line""")
+                    gdb_process.stdin.write("quit\n")
+                    return
+                run_cmd("-inferior-tty-set %s" % name, True)
 
             run_cmd("-enable-pretty-printing")
             run_cmd("-gdb-set target-async 1")
