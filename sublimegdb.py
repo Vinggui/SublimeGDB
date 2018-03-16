@@ -1486,6 +1486,9 @@ def gdboutput(pipe):
                 pid_end_num = line.find("\"",pid_start_num)
                 gdb_pid = int(line[pid_start_num:pid_end_num])
 
+            if line.startswith("=thread-group-exited"):
+                log_debug("gdb: exiting...\n")
+                break
         except:
             traceback.print_exc()
     if pipe == gdb_process.stdout:
@@ -1493,15 +1496,15 @@ def gdboutput(pipe):
         gdb_session_view.add_line("GDB session ended\n")
         sublime.set_timeout(session_ended_status_message, 0)
         gdb_stack_frame = None
+        for view in gdb_views:
+            sublime.set_timeout(view.on_session_ended, 0)
+        sublime.set_timeout(cleanup, 0)
     global gdb_cursor_position
     gdb_stack_index = -1
     gdb_cursor_position = 0
     gdb_run_status = None
     sublime.set_timeout(update_view_markers, 0)
 
-    for view in gdb_views:
-        sublime.set_timeout(view.on_session_ended, 0)
-    sublime.set_timeout(cleanup, 0)
 
 def cleanup():
     global __debug_file_handle
@@ -1682,6 +1685,8 @@ class GdbLaunch(sublime_plugin.WindowCommand):
         global gdb_windows_bash
         global DEBUG
         global DEBUG_FILE
+        global gdb_break_loops
+        gdb_break_loops = False
         view = self.window.active_view()
         DEBUG = get_setting("debug", False, view)
         DEBUG_FILE = expand_path(get_setting("debug_file", "stdout", view), self.window)
@@ -1765,10 +1770,10 @@ class GdbLaunch(sublime_plugin.WindowCommand):
 
             gdb_shutting_down = False
 
-            t = threading.Thread(target=gdboutput, args=(gdb_process.stdout,))
-            t.start()
-            t = threading.Thread(target=gdboutput, args=(gdb_process.stderr,))
-            t.start()
+            t1 = threading.Thread(target=gdboutput, args=(gdb_process.stdout,))
+            t1.start()
+            t2 = threading.Thread(target=gdboutput, args=(gdb_process.stderr,))
+            t2.start()
 
             if gdb_windows_bash == False:
                 try:
@@ -1779,17 +1784,17 @@ class GdbLaunch(sublime_plugin.WindowCommand):
                     pipe, name = tempfile.mkstemp()
                     pty, tty = pipe, None
                 log_debug("pty: %s, tty: %s, name: %s" % (pty, tty, name))
-                t = threading.Thread(target=programio, args=(pty,tty))
-                t.start()
+                t3 = threading.Thread(target=programio, args=(pty,tty))
+                t3.start()
+                try:
+                    run_cmd("-gdb-show interpreter", True, timeout=get_setting("gdb_timeout", 20))
+                except:
+                    sublime.error_message("""\
+    It seems you're not running gdb with the "mi" interpreter. Please add
+    "--interpreter=mi" to your gdb command line""")
+                    gdb_process.stdin.write("quit\n")
+                    return
                 run_cmd("-inferior-tty-set %s" % name, True)
-            try:
-                run_cmd("-gdb-show interpreter", True, timeout=get_setting("gdb_timeout", 20))
-            except:
-                sublime.error_message("""\
-It seems you're not running gdb with the "mi" interpreter. Please add
-"--interpreter=mi" to your gdb command line""")
-                gdb_process.stdin.write("quit\n")
-                return
 
             run_cmd("-enable-pretty-printing")
             run_cmd("-gdb-set target-async 1")
@@ -1844,12 +1849,14 @@ class GdbContinue(sublime_plugin.WindowCommand):
 class GdbExit(sublime_plugin.WindowCommand):
     def run(self):
         global gdb_shutting_down
+        global gdb_bkp_layout
         gdb_shutting_down = True
         wait_until_stopped()
         run_cmd("-gdb-exit", True)
         if gdb_server_process:
             gdb_server_process.terminate()
         gdb_process.kill()
+        gdb_bkp_window.set_layout(gdb_bkp_layout)
 
     def is_enabled(self):
         return is_running()
