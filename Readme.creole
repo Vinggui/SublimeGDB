@@ -3,18 +3,20 @@ GDB plugin for Sublime Text 3, running on windows 10 WSL (Windows Subsystem for 
 (python 3).
 
 Please observe that this is a fork from the original SublimeGDB (https://github.com/quarnster/SublimeGDB).
-So far, I`ve tested only with my project. Feel free to try.
+So far, I've tested only with my project. Feel free to try.
 
 === Installation ===
 Usually just git clone this repo to your "c:\Users\<user>\AppData\Roaming\Sublime Text 3\Packages\"
 
 I used my SublimeGDB.sublime-settings like this:
+{{{
 {
-  "workingdir": "C:\\<more path...>\\<path to the executable>",
+  "workingdir": "C:\\"<more path...>\\<path to the executable>",
   "commandline": "bash -c \"gdb --interpreter=mi .\/<executable>\"",
   "windows_bash_compatibility": true,
   "gdb_timeout": 3,
 }
+}}}
 
 
 === Usage ===
