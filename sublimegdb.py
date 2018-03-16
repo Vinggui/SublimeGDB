@@ -140,6 +140,7 @@ sync_status_mutex = threading.Condition()
 gdb_pid = 0
 gdb_windows_bash = False
 
+gdb_temp_stop = False
 gdb_sending_buffer = None
 gdb_lastresult = ""
 gdb_lastline = ""
@@ -1104,14 +1105,19 @@ class GDBBreakpoint(object):
             self.breakpoint_added(res)
 
     def add(self):
+        global gdb_temp_stop
         if is_running():
+            gdb_temp_stop = True
             res = wait_until_stopped()
             self.insert()
             if res:
                 resume()
 
+
     def remove(self):
+        global gdb_temp_stop
         if is_running():
+            gdb_temp_stop = True
             res = wait_until_stopped()
             run_cmd("-break-delete %s" % self.number)
             if res:
@@ -1341,14 +1347,13 @@ def run_cmd(cmd, block=False, mimode=True, timeout=10):
 def wait_until_stopped():
     global sync_status_mutex
     global gdb_run_status
-    global gdb_process
     if gdb_run_status == "running":
         command_to_kill = "bash -c \"kill -2 %d\""%gdb_pid
         subprocess.check_output(command_to_kill)
-        time.sleep(0.1)
+        while gdb_run_status != "stopped":
+            time.sleep(0.1)
         #result = run_cmd("-exec-interrupt --all", True)
         #if "^done" in result:
-        gdb_run_status = "stopped"
         return True
     return False
 
@@ -1430,6 +1435,7 @@ def gdboutput(pipe):
     global gdb_windows_bash
     global sync_check_return_mutex
     global gdb_pid
+    global gdb_temp_stop
     command_result_regex = re.compile("^\d+\^")
     run_status_regex = re.compile("(^\d*\*)([^,]+)")
 
@@ -1456,11 +1462,13 @@ def gdboutput(pipe):
                 if reason is not None and reason.group(0).startswith("exited"):
                     log_debug("gdb: exiting %s" % line)
                     run_cmd("-gdb-exit")
-                elif not "running" in gdb_run_status and not gdb_shutting_down:
+                elif not "running" in gdb_run_status and not gdb_shutting_down and not gdb_temp_stop:
                     thread_id = re.search('thread-id="(\d+)"', line)
                     if thread_id is not None:
                         gdb_threads_view.select_thread(int(thread_id.group(1)))
                     sublime.set_timeout(update_cursor, 0)
+                elif gdb_temp_stop:
+                    gdb_temp_stop = False
             if not line.startswith("(gdb)"):
                 gdb_lastline = line
             if command_result_regex.match(line) is not None:
@@ -1841,6 +1849,7 @@ class GdbExit(sublime_plugin.WindowCommand):
         run_cmd("-gdb-exit", True)
         if gdb_server_process:
             gdb_server_process.terminate()
+        gdb_process.kill()
 
     def is_enabled(self):
         return is_running()
@@ -1860,7 +1869,14 @@ class GdbLoad(sublime_plugin.WindowCommand):
 
 class GdbPause(sublime_plugin.WindowCommand):
     def run(self):
-        run_cmd("-exec-interrupt")
+        global gdb_run_status
+        #run_cmd("-exec-interrupt")
+        
+        if gdb_run_status == "running":
+            command_to_kill = "bash -c \"kill -2 %d\""%gdb_pid
+            subprocess.check_output(command_to_kill)
+            while gdb_run_status != "stopped":
+                time.sleep(0.1)
 
     def is_enabled(self):
         return is_running() and gdb_run_status != "stopped"
